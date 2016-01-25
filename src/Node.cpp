@@ -1,0 +1,207 @@
+#include <QDialog>
+#include <QFont>
+#include <QFormLayout>
+#include <QGraphicsScene>
+#include <QGraphicsSceneMouseEvent>
+#include <QGraphicsView>
+#include <QGridLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
+#include <QPainter>
+#include <QPushButton>
+#include <QStandardItemModel>
+#include <QStackedWidget>
+#include <QComboBox>
+#include <QXmlStreamWriter>
+#include <QDomElement>
+#include <QCheckBox>
+
+#include "Node.h"
+#include "moc_Node.cpp"
+
+#include "Link.h"
+#include "ActionEditor.h"
+#include "Action.h"
+#include "ConversationData.h"
+#include "ConversationContext.h"
+
+Node::Node() {
+    m_id = -1;
+    m_selected = false;
+    m_size = QSizeF(150, 100);
+    m_isEntry = false;
+
+    setFlags(ItemIsSelectable | ItemIsMovable);
+
+    m_actionModel = new QStandardItemModel();
+}
+
+Node::~Node() {
+}
+
+QRectF Node::boundingRect() const {
+    // accommodate borders
+    const qreal border = 1.0;
+    return QRectF(QPointF(0,0), m_size + QSizeF(border*2, border*2));
+}
+
+void Node::paint(QPainter *painter, const QStyleOptionGraphicsItem *style,
+    QWidget *widget) {
+
+    QBrush b;
+    if(m_selected) b.setColor(QColor::fromRgb(200, 200, 255));
+    else if(m_isEntry) b.setColor(QColor::fromRgb(255, 224, 224));
+    else b.setColor(QColor::fromRgb(240, 240, 240));
+    b.setStyle(Qt::SolidPattern);
+    painter->setBrush(b);
+    painter->drawRect(QRectF(QPointF(0,0), m_size));
+
+    if(!m_context.isNull()) {
+        painter->setPen(QPen(Qt::white, 0));
+        painter->setBrush(Qt::white);
+        painter->drawRect(QRectF(QPointF(1,1+m_size.height()/2), QSizeF(m_size.width()-2, m_size.height()/2-2)));
+        painter->setBrush(m_context->deriveBrush());
+        painter->drawRect(QRectF(QPointF(1,1+m_size.height()/2), QSizeF(m_size.width()-2, m_size.height()/2-2)));
+    }
+
+    QFont f;
+    f.setBold(true);
+    QFontMetricsF fm(f);
+    painter->setFont(f);
+
+    qreal width = fm.width(m_label);
+    painter->setBrush(Qt::NoBrush);
+
+    painter->setPen(Qt::black);
+    painter->drawText(
+        boundingRect().center() - QPointF(width/2,m_size.height()/4) + QPointF(2,1), m_label);
+}
+
+void Node::edit(ConversationDataInterface *interface,
+    ConversationData *data, QFormLayout *layout) {
+
+    if(m_id == -1) {
+        m_id = data->getAvailableID();
+    }
+
+    QLineEdit *labelEdit = new QLineEdit(m_label);
+    layout->addRow(tr("Label:"), labelEdit);
+    labelEdit->setFocus();
+    connect(labelEdit, &QLineEdit::textChanged,
+        [=](const QString &label){ m_label = label; emit changed(); });
+
+    QCheckBox *entryBox = new QCheckBox();
+    entryBox->setCheckState(m_isEntry ? Qt::Checked : Qt::Unchecked);
+    connect(entryBox, &QCheckBox::stateChanged,
+        [=](){
+            m_isEntry = entryBox->checkState() == Qt::Checked;
+            update();
+        });
+
+    // make sure we don't have more than one entry node
+    auto items = scene()->items();
+    bool entrySet = false;
+    for(auto it : items) {
+        auto n = dynamic_cast<Node *>(it);
+        if(!n) continue;
+        if(n == this) continue;
+        entrySet |= n->m_isEntry;
+        if(entrySet) break;
+    }
+
+    if(entrySet) entryBox->setEnabled(false);
+
+    layout->addRow(tr("Entry:"), entryBox);
+
+    auto nameLabel = new QLabel(tr("Not selected"));
+    layout->addRow(new QLabel("Context:"), nameLabel);
+    auto chooseButton = new QPushButton(tr("Change"));
+    layout->addRow(nullptr, chooseButton);
+    if(m_context) nameLabel->setText(m_context->label());
+
+    connect(chooseButton, &QPushButton::clicked,
+        [=]() {
+            m_context = data->selectContext(chooseButton);
+            if(m_context) nameLabel->setText(m_context->label());
+            else nameLabel->setText("Not selected");
+            update();
+        });
+
+
+    ActionEditor *editor = new ActionEditor(interface, data, m_actionModel);
+    layout->addRow(editor);
+}
+
+bool Node::isSelection(QPointF point) {
+    return boundingRect().contains(point);
+}
+
+void Node::serialize(QXmlStreamWriter &xml) {
+    xml.writeStartElement("node");
+
+    xml.writeAttribute("id", QString().setNum(m_id));
+    xml.writeAttribute("width", QString().setNum(m_size.width()));
+    xml.writeAttribute("height", QString().setNum(m_size.height()));
+    xml.writeAttribute("x", QString().setNum(pos().x()));
+    xml.writeAttribute("y", QString().setNum(pos().y()));
+    xml.writeAttribute("label", m_label);
+    if(m_isEntry) xml.writeAttribute("entry", "true");
+    if(!m_context.isNull())
+        xml.writeAttribute("context", QString().setNum(m_context->id()));
+
+    auto root = m_actionModel->invisibleRootItem();
+    for(int i = 0; i < root->rowCount(); i ++)
+        Action::serialize(xml, root->child(i));
+
+    xml.writeEndElement();
+}
+
+void Node::deserialize(QDomElement &xml,
+    const QMap<int, ConversationObject *> &objs, ConversationData *data) {
+
+    m_id = xml.attribute("id").toInt();
+    m_label = xml.attribute("label");
+    m_size = QSizeF(xml.attribute("width").toDouble(),
+        xml.attribute("height").toDouble());
+    setPos(QPointF(xml.attribute("x").toDouble(),
+        xml.attribute("y").toDouble()));
+    prepareGeometryChange();
+    if(xml.attribute("entry") == "true")
+        m_isEntry = true;
+    bool ok = false;
+    int id = xml.attribute("context").toInt(&ok);
+    if(ok) m_context = data->getContextByID(id);
+
+    // if there are no children, we're done here.
+    if(!xml.hasChildNodes()) return;
+
+    auto nodes = xml.childNodes();
+    for(int i = 0; i < nodes.length(); i ++) {
+        auto node = nodes.at(i);
+        if(!node.isElement()) continue;
+        auto element = node.toElement();
+        if(element.tagName() != "action") continue;
+        m_actionModel->invisibleRootItem()->appendRow(
+            Action::deserialize(element, objs));
+    }
+}
+
+void Node::visitActions(std::function<void (QStandardItem *)> visitor) {
+    auto root = m_actionModel->invisibleRootItem();
+    for(int i = 0; i < root->rowCount(); i ++)
+        Action::walkTree(visitor, root->child(i));
+}
+
+void Node::mouseMoveEvent(QGraphicsSceneMouseEvent *event) {
+    if(event->buttons() & Qt::RightButton) {
+        QPointF last = mapFromScene(event->lastScenePos());
+        QPointF now = mapFromScene(event->scenePos());
+        QPointF delta = now-last;
+
+        setPos(pos() + delta);
+
+        prepareGeometryChange();
+    }
+}

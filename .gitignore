@@ -1,0 +1,10 @@
+/core
+.vimrc
+.ycm_extra_conf.*
+/build
+/pineseed_editor
+*.swp
+.gdb_history
+/autosave.xml
+/autosave.xml.backup
+/tmp
